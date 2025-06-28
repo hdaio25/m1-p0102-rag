@@ -83,7 +83,8 @@ def process_pdf(uploaded_file):
     )
     
     docs = semantic_splitter.split_documents(documents)
-    vector_db = Chroma.from_documents(documents=docs, embedding=st.session_state.embeddings)
+    # Fix: Use in-memory Chroma to avoid tenant error
+    vector_db = Chroma.from_documents(documents=docs, embedding=st.session_state.embeddings, persist_directory=None)
     retriever = vector_db.as_retriever()
     
     prompt = hub.pull("rlm/rag-prompt")
