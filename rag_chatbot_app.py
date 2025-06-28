@@ -135,7 +135,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     st.title("PDF RAG Assistant")
-    st.logo("./logo.png", size="large")
+    st.logo("./assets/logo.png", size="large")
     
     # Sidebar
     with st.sidebar:
