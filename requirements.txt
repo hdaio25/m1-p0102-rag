@@ -1,6 +1,6 @@
 transformers==4.52.4
 bitsandbytes==0.46.0
-tokenizers==0.19.1
+#tokenizers==0.19.1
 accelerate
 langchain==0.3.25
 langchainhub==0.1.21
