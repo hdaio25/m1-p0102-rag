@@ -135,6 +135,8 @@ def main():
         initial_sidebar_state="expanded"
     )
     st.title("PDF RAG Assistant")
+
+    # Trong streamlit v-1.38 không khỗ trợ param size
     st.logo("./assets/logo.png", size="large")
     
     # Sidebar
