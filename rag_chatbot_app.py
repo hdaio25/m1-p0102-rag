@@ -2,6 +2,7 @@ import streamlit as st
 import tempfile
 import os
 import torch
+import chromadb
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
@@ -12,7 +13,11 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from transformers import BitsAndBytesConfig
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
 import time
+from operator import itemgetter
+from utils.logging_utils import logger
 
 # Session state initialization
 if 'rag_chain' not in st.session_state:
@@ -34,6 +39,11 @@ if 'pdf_name' not in st.session_state:
 @st.cache_resource
 def load_embeddings():
     return HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
+
+def get_chroma_client(allow_reset=False):
+    """Get a Chroma client for vector database operations."""
+    # Use PersistentClient for persistent storage
+    return chromadb.PersistentClient(settings=chromadb.Settings(allow_reset=allow_reset))
 
 @st.cache_resource  
 def load_llm():
@@ -65,8 +75,77 @@ def load_llm():
     
     return HuggingFacePipeline(pipeline=model_pipeline)
 
+
+def build_prompt_fromhub_ragprompt():
+    """Build a prompt for the RAG chain."""
+    # Load the prompt from the hub: "rlm/rag-prompt"
+    return hub.pull("rlm/rag-prompt")
+
+def build_prompt_ragprompt_en():
+    # This is the exact prompt from "rlm/rag-prompt" hub
+    template = """
+    You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.
+    Question: {question} 
+    Context: {context} 
+    Answer:"""
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+
+def build_prompt_ragprompt_vn():
+    # This is the exact prompt from "rlm/rag-prompt" hub
+    template = """
+    Bạn là một trợ lý chuyên thực hiện các nhiệm vụ hỏi-đáp. Hãy sử dụng những đoạn ngữ cảnh được truy xuất sau đây để trả lời câu hỏi. Nếu bạn không biết câu trả lời, chỉ cần nói rằng bạn không biết. Trả lời tối đa ba câu và giữ cho câu trả lời ngắn gọn.
+    Question: {question} 
+    Context: {context} 
+    Answer:"""
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+
+def build_prompt_ragprompt_withhistory_en():
+    # This is the exact prompt from "rlm/rag-prompt" hub
+
+
+    template = """
+    You are an assistant for question-answering tasks. Use the following pieces of retrieved context and conversation history to answer the question. If you don't know the answer, just say that you don't know. 
+    Instructions:
+    - Use three sentences maximum
+    - Keep the answer concise
+
+    Conversation history:
+    {chat_history}
+    
+    Context:
+    {context} 
+
+    Question: {question} 
+
+    Answer:"""
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+
+def build_prompt_v2():
+    # Build a custom prompt for the RAG chain
+    template = """
+    Bạn là một trợ lý AI thông minh, chuyên trả lời các câu hỏi dựa trên tài liệu được cung cấp.
+    Context:
+    {context}
+    
+    Hãy trả lời câu hỏi sau đây một cách ngắn gọn và chính xác:
+    {question}
+    
+    Trả lời của bạn nên dựa trên thông tin trong tài liệu và không được thêm bất kỳ thông tin nào không có trong đó.
+    """
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+
+def retrieve_chat_history():
+    # Retrieve the last x messages from chat history
+    message_threshold = 10  # Number of messages to retrieve
+    return st.session_state.chat_history[-message_threshold:] if len(st.session_state.chat_history) >= message_threshold else st.session_state.chat_history
+
+#@st.cache_resource
 def process_pdf(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+    with tempfile.NamedTemporaryFile(delete=False, prefix = uploaded_file.name, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_file_path = tmp_file.name
     
@@ -83,18 +162,51 @@ def process_pdf(uploaded_file):
     )
     
     docs = semantic_splitter.split_documents(documents)
-    # Fix: Use in-memory Chroma to avoid tenant error
-    vector_db = Chroma.from_documents(documents=docs, embedding=st.session_state.embeddings, persist_directory=None)
+    # Fix: Use ephemeral ChromaDB client to avoid tenant error
+    # client = chromadb.EphemeralClient()
+    client = get_chroma_client(allow_reset=True)
+    client.reset()  # Reset client to ensure no previous state
+    vector_db = Chroma.from_documents(
+        documents=docs, 
+        embedding=st.session_state.embeddings,
+        client=client
+    )
     retriever = vector_db.as_retriever()
     
-    prompt = hub.pull("rlm/rag-prompt")
-    
+    #prompt = hub.pull("rlm/rag-prompt")
+    prompt = build_prompt_ragprompt_withhistory_en()
+
     def format_docs(docs):
+        logger.info(f"**Debug: Retrieved {len(docs)} chunks:**")
+        for i, doc in enumerate(docs):
+            # Extract metadata if available
+            # Assuming each doc has metadata with 'page' and 'source'
+            page_num = doc.metadata.get('page') + 1 if 'page' in doc.metadata else -1
+            source = doc.metadata.get('source', 'document')
+            file_name = os.path.basename(source) if isinstance(source, str) else 'unknown'
+
+            logger.info(f"""
+            ([reference-{i+1}] Page {page_num} - Source: {file_name})
+            {doc.page_content}""")
+        
         return "\n\n".join(doc.page_content for doc in docs)
     
+    def format_history(histories):
+        formatted_history = ""
+        for msg in histories:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            formatted_history += f"{role}: {msg['content']}\n\n"
+        return formatted_history.strip()
+    
+    
     rag_chain = (
-        {"context": retriever | format_docs, "question": RunnablePassthrough()}
-        | prompt 
+        {
+            "context": itemgetter("question") | retriever | format_docs,
+            #"question": RunnablePassthrough(),
+            "question": itemgetter("question"),
+            "chat_history": lambda x: format_history(x["chat_history"])
+        }
+        | prompt
         | st.session_state.llm
         | StrOutputParser()
     )
@@ -226,7 +338,11 @@ def main():
                 with st.chat_message("assistant"):
                     with st.spinner("Đang suy nghĩ..."):
                         try:
-                            output = st.session_state.rag_chain.invoke(user_input)
+                            # output = st.session_state.rag_chain.invoke(user_input)
+                            output = st.session_state.rag_chain.invoke({
+                                "question": user_input,
+                                "chat_history": retrieve_chat_history()
+                            })
                             # Clean up the response
                             if 'Answer:' in output:
                                 answer = output.split('Answer:')[1].strip()
@@ -240,6 +356,7 @@ def main():
                             add_message("assistant", answer)
                             
                         except Exception as e:
+                            logger.error(e, exc_info=True)
                             error_msg = f"Xin lỗi, đã có lỗi xảy ra: {str(e)}"
                             st.error(error_msg)
                             add_message("assistant", error_msg)

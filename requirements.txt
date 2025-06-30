@@ -1,7 +1,10 @@
 transformers==4.52.4
 bitsandbytes==0.46.0
 #tokenizers==0.19.1
+tiktoken # TO CHECK IF WE NEED THIS
+blobfile # TO CHECK IF WE NEED THIS
 accelerate
+sentencepiece # TO CHECK IF WE NEED THIS OR TIKETOKEN
 langchain==0.3.25
 langchainhub==0.1.21
 langchain-chroma==0.2.3
@@ -11,3 +14,4 @@ langchain_huggingface==0.2.0
 python-dotenv==1.1.0
 pypdf
 streamlit==1.46.0
+#python-dotenv 
