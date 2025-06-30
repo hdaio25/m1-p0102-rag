@@ -1,7 +1,9 @@
+from typing import List
 import streamlit as st
 import tempfile
 import os
 import torch
+import chromadb
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_huggingface.embeddings import HuggingFaceEmbeddings
 from langchain_experimental.text_splitter import SemanticChunker
@@ -12,6 +14,11 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from transformers import BitsAndBytesConfig
+from utils.logging_utils import logger
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.documents import Document
+#from dotenv import load_dotenv
+#load_dotenv() # Load variables from .env
 
 # Session state initialization
 if 'rag_chain' not in st.session_state:
@@ -78,8 +85,47 @@ def load_llm():
     
     return HuggingFacePipeline(pipeline=model_pipeline)
 
+def build_custom_rag_prompt():
+    # Define a custom prompt for the RAG system
+    
+    template = """
+    <Context>
+    {context}
+    </Context>
+
+    Dựa vào thông tin trong phần Context ở trên, hãy trả lời câu hỏi sau một cách chính xác và đầy đủ.
+    Nếu không thể tìm thấy thông tin để trả lời trong Context, hãy nói rõ rằng bạn không có đủ thông tin để trả lời.
+    Trả lời bằng tiếng Việt và đảm bảo các thông tin được trích dẫn từ nguồn đã cung cấp.
+
+    Question: {question}
+    
+    Answer:
+
+    Trích dẫn:
+    """
+    
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+
+def build_rag_prompt_v1():
+    # Define a custom prompt for the RAG system
+    
+    template = """
+    Bạn là một trợ lý cho các nhiệm vụ trả lời câu hỏi. Hãy sử dụng các phần ngữ cảnh được truy xuất sau đây để trả lời câu hỏi. Nếu bạn không biết câu trả lời, chỉ cần nói rằng bạn không biết. Sử dụng tối đa ba câu và giữ cho câu trả lời ngắn gọn.
+    Question: {question} 
+    Context: {context} 
+    Answer:
+    """
+    
+    prompt = ChatPromptTemplate.from_template(template)
+    return prompt
+def get_chroma_client(allow_reset=False):
+    """Get a Chroma client for vector database operations."""
+    # Use PersistentClient for persistent storage
+    return chromadb.PersistentClient(settings=chromadb.Settings(allow_reset=allow_reset))
+
 def process_pdf(uploaded_file):
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+    with tempfile.NamedTemporaryFile(delete=False, prefix = uploaded_file.name, suffix=".pdf") as tmp_file:
         tmp_file.write(uploaded_file.getvalue())
         tmp_file_path = tmp_file.name
     
@@ -96,14 +142,48 @@ def process_pdf(uploaded_file):
     )
     
     docs = semantic_splitter.split_documents(documents)
-    vector_db = Chroma.from_documents(documents=docs, embedding=st.session_state.embeddings)
+    chroma_client = get_chroma_client(allow_reset=True)
+    chroma_client.reset() # empties and completely resets the database. This is destructive and not reversible.
+    
+    vector_db = Chroma.from_documents(
+        documents=docs, 
+        embedding=st.session_state.embeddings,
+        client=chroma_client)
     retriever = vector_db.as_retriever()
     
+    #prompt = build_custom_rag_prompt()
     prompt = hub.pull("rlm/rag-prompt")
     
     def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+        logger.info(f"**Debug: Retrieved {len(docs)} chunks:**")
+        for i, doc in enumerate(docs):
+            # Extract metadata if available
+            # Assuming each doc has metadata with 'page' and 'source'
+            page_num = doc.metadata.get('page') + 1 if 'page' in doc.metadata else -1
+            source = doc.metadata.get('source', 'document')
+            file_name = os.path.basename(source) if isinstance(source, str) else 'unknown'
+
+            logger.info(f"""
+            ([reference-{i+1}] Page {page_num} - Source: {file_name})
+            {doc.page_content}""")
+        result = "\n\n".join(doc.page_content for doc in docs)
+        #logger.info(result)
+        return result
     
+    def format_docs_with_citation(docs: List[Document])-> str:
+        logger.info(f"**Debug: Retrieved {len(docs)} chunks:**")
+        formatted_docs = []
+        for i, doc in enumerate(docs):
+            # Extract metadata if available
+            # Assuming each doc has metadata with 'page' and 'source'
+            page_num = doc.metadata.get('page')
+            source = doc.metadata.get('source', 'document')
+            formatted_docs.append(f"""
+Trích dẫn: {source} (Trang {page_num})
+Nội dung: {doc.page_content}""")
+            
+        result = "\n\n".join(formatted_docs)
+        return result
     rag_chain = (
         {"context": retriever | format_docs, "question": RunnablePassthrough()}
         | prompt 
