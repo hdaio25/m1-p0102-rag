@@ -141,7 +141,7 @@ def build_prompt_v2():
 def retrieve_chat_history():
     # Retrieve the last x messages from chat history
     message_threshold = 10  # Number of messages to retrieve
-    return st.session_state.chat_history[-message_threshold:] if len(st.session_state.chat_history) >= message_threshold else st.session_state.chat_history
+    return st.session_state.chat_history[-message_threshold:-1]
 
 #@st.cache_resource
 def process_pdf(uploaded_file):
